@@ -14,31 +14,73 @@ app = Flask(__name__)
 ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
+if not ROBOFLOW_API_KEY:
+    raise ValueError("ROBOFLOW_API_KEY environment variable is required")
+if not GITHUB_TOKEN:
+    raise ValueError("GITHUB_TOKEN environment variable is required")
+
 # ================= PERSISTENT STORAGE =================
 ESP_RESULTS_FILE = "esp_results.json"
 ESP_RESULTS = {}  # { esp_id: { count: int, last_update: int } }
 ESP_LOCK = Lock()
 
+# ================= GITHUB CONFIG =================
+GITHUB_REPO = "onlykartika/ESP32-CAM"
+GITHUB_FOLDER = "images"  # gambar tetap di folder images
+GITHUB_API_IMAGES = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
+GITHUB_API_ROOT = f"https://api.github.com/repos/{GITHUB_REPO}/contents"  # untuk esp_results.json di root
+GITHUB_HEADERS = {
+    "Authorization": f"token {GITHUB_TOKEN}",
+    "User-Agent": "Render-AI-Server",
+    "Accept": "application/vnd.github.v3+json"
+}
+
 def load_esp_results():
+    global ESP_RESULTS
+    # 1. Coba load dari file lokal
     if os.path.exists(ESP_RESULTS_FILE):
         try:
             with open(ESP_RESULTS_FILE, "r") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    print("[INFO] ESP_RESULTS loaded from file")
+                    ESP_RESULTS = data
+                    print("[INFO] ESP_RESULTS loaded from local file")
                     return data
         except Exception as e:
-            print(f"[ERROR] Failed loading esp_results.json: {e}")
+            print(f"[ERROR] Failed loading local esp_results.json: {e}")
+
+    # 2. Kalau gagal/kosong, fallback ke GitHub
+    try:
+        get_url = f"{GITHUB_API_ROOT}/esp_results.json"
+        res = requests.get(get_url, headers=GITHUB_HEADERS, timeout=10)
+        if res.status_code == 200:
+            content_b64 = res.json()["content"]
+            content = base64.b64decode(content_b64).decode('utf-8')
+            data = json.loads(content)
+            if isinstance(data, dict):
+                ESP_RESULTS = data
+                # Simpan juga ke lokal biar cepat next time
+                save_esp_results()
+                print("[INFO] ESP_RESULTS loaded from GitHub fallback")
+                return data
+        else:
+            print(f"[WARN] esp_results.json not found on GitHub (status {res.status_code})")
+    except Exception as e:
+        print(f"[WARN] Failed loading esp_results.json from GitHub: {e}")
+
+    # 3. Kalau semua gagal → mulai dari kosong
+    ESP_RESULTS = {}
     return {}
 
 def save_esp_results():
     try:
         with open(ESP_RESULTS_FILE, "w") as f:
             json.dump(ESP_RESULTS, f)
-        print("[INFO] ESP_RESULTS saved")
+        print("[INFO] ESP_RESULTS saved to local file")
     except Exception as e:
-        print(f"[ERROR] Failed saving esp_results.json: {e}")
+        print(f"[ERROR] Failed saving local esp_results.json: {e}")
 
+# Load saat app start
 ESP_RESULTS = load_esp_results()
 
 # ================= ROBOFLOW (LAZY INIT) =================
@@ -56,20 +98,10 @@ def get_rf_client():
 WORKSPACE_NAME = "my-workspace-grzes"
 WORKFLOW_ID = "detect-count-and-visualize"
 
-# ================= GITHUB =================
-GITHUB_REPO = "onlykartika/ESP32-CAM"
-GITHUB_FOLDER = "images"
-GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
-GITHUB_HEADERS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "User-Agent": "Render-AI-Server",
-    "Accept": "application/vnd.github.v3+json"
-}
-
 # ================= HEALTH CHECK =================
 @app.route("/", methods=["GET"])
 def health():
-    return "Render AI server running"
+    return "Render AI server running - with GitHub persistent backup"
 
 # ================= IMAGE UPLOAD =================
 @app.route("/upload", methods=["POST"])
@@ -83,13 +115,14 @@ def upload():
     timestamp = int(time.time())
     filename = f"{esp_id}_{timestamp}.jpg"
 
+    # Simpan gambar sementara
     try:
         with open(filename, "wb") as f:
             f.write(request.data)
     except Exception as e:
         return jsonify({"error": "failed to save image", "detail": str(e)}), 500
 
-    # ===== ROBOFLOW =====
+    # ===== ROBOFLOW INFERENCE =====
     try:
         rf = get_rf_client()
         result = rf.run_workflow(
@@ -102,12 +135,12 @@ def upload():
         os.remove(filename)
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
 
-    # ===== UPLOAD TO GITHUB (BEST EFFORT) =====
+    # ===== UPLOAD GAMBAR KE GITHUB (best effort) =====
     try:
         with open(filename, "rb") as f:
             content = base64.b64encode(f.read()).decode()
 
-        put_url = f"{GITHUB_API}/{esp_id}/{filename}"
+        put_url = f"{GITHUB_API_IMAGES}/{esp_id}/{filename}"
         res = requests.put(
             put_url,
             headers=GITHUB_HEADERS,
@@ -117,12 +150,14 @@ def upload():
             },
             timeout=15
         )
-
         if res.status_code not in (200, 201):
-            print(f"[WARN] GitHub upload failed: {res.status_code}")
+            print(f"[WARN] GitHub image upload failed: {res.status_code}")
+        else:
+            print(f"[INFO] Image {filename} uploaded to GitHub")
     except Exception as e:
-        print(f"[WARN] GitHub upload error: {e}")
+        print(f"[WARN] GitHub image upload error: {e}")
 
+    # Hapus file sementara
     try:
         os.remove(filename)
     except:
@@ -130,7 +165,6 @@ def upload():
 
     # ===== PARSE ROBOFLOW RESULT =====
     predictions = []
-
     if isinstance(result, dict) and "predictions" in result:
         predictions = result["predictions"]
     elif isinstance(result, list):
@@ -140,7 +174,6 @@ def upload():
 
     TARGET_LABEL = "panulirus ornatus - juvenile"
     filtered = []
-
     for p in predictions:
         if not isinstance(p, dict):
             continue
@@ -154,13 +187,40 @@ def upload():
 
     detected_count = len(filtered)
 
-    # ===== SAVE RESULT =====
+    # ===== UPDATE & SAVE RESULT =====
     with ESP_LOCK:
         ESP_RESULTS[esp_id] = {
             "count": detected_count,
             "last_update": int(time.time() * 1000)
         }
-        save_esp_results()
+        save_esp_results()  # simpan ke lokal
+
+        # ===== UPLOAD ESP_RESULTS.JSON KE GITHUB (persistent backup) =====
+        try:
+            json_filename = "esp_results.json"
+            json_content = json.dumps(ESP_RESULTS).encode('utf-8')
+            content_b64 = base64.b64encode(json_content).decode('utf-8')
+
+            # Ambil sha kalau file sudah ada
+            get_url = f"{GITHUB_API_ROOT}/{json_filename}"
+            get_res = requests.get(get_url, headers=GITHUB_HEADERS, timeout=10)
+            sha = get_res.json().get("sha") if get_res.status_code == 200 else None
+
+            put_url = f"{GITHUB_API_ROOT}/{json_filename}"
+            put_data = {
+                "message": f"Update results from {esp_id} upload at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                "content": content_b64
+            }
+            if sha:
+                put_data["sha"] = sha
+
+            put_res = requests.put(put_url, headers=GITHUB_HEADERS, json=put_data, timeout=15)
+            if put_res.status_code in (200, 201):
+                print("[INFO] esp_results.json successfully uploaded to GitHub")
+            else:
+                print(f"[WARN] GitHub JSON upload failed: {put_res.status_code} {put_res.text}")
+        except Exception as e:
+            print(f"[WARN] GitHub JSON upload error: {e}")
 
     total_all = sum(v["count"] for v in ESP_RESULTS.values())
 
