@@ -4,6 +4,7 @@ import base64
 import requests
 from flask import Flask, request, jsonify
 from inference_sdk import InferenceHTTPClient
+from threading import Lock
 
 # ================= FLASK APP =================
 app = Flask(__name__)
@@ -32,6 +33,10 @@ GITHUB_HEADERS = {
     "User-Agent": "Render-AI-Server"
 }
 
+# ================= GLOBAL STORAGE (BARU) =================
+ESP_RESULTS = {}          # { esp_id: total_detected }
+ESP_LOCK = Lock()         # aman untuk request bersamaan
+
 # ================= HEALTH CHECK =================
 @app.route("/", methods=["GET"])
 def health():
@@ -43,9 +48,12 @@ def upload():
     if not request.data:
         return jsonify({"error": "no image received"}), 400
 
+    # ===== AMBIL ESP ID (BARU) =====
+    esp_id = request.headers.get("X-ESP-ID", "unknown")
+
     # ===== SIMPAN IMAGE SEMENTARA =====
     timestamp = int(time.time())
-    filename = f"{timestamp}.jpg"
+    filename = f"{esp_id}_{timestamp}.jpg"
 
     with open(filename, "wb") as f:
         f.write(request.data)
@@ -61,16 +69,16 @@ def upload():
     except Exception as e:
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
 
-    # ===== UPLOAD IMAGE KE GITHUB =====
+    # ===== UPLOAD IMAGE KE GITHUB (PER ESP) =====
     try:
         with open(filename, "rb") as f:
             content = base64.b64encode(f.read()).decode()
 
         requests.put(
-            f"{GITHUB_API}/{filename}",
+            f"{GITHUB_API}/{esp_id}/{filename}",
             headers=GITHUB_HEADERS,
             json={
-                "message": f"upload from esp32 ({filename})",
+                "message": f"upload from {esp_id} ({filename})",
                 "content": content
             },
             timeout=15
@@ -107,20 +115,44 @@ def upload():
         conf = p.get("confidence") or p.get("score") or 0
 
         if label and label.lower() == TARGET_LABEL.lower():
-            filtered.append({
-                "label": label,
-                "confidence": round(conf * 100, 2)
-            })
+            if conf >= 0.6:  # threshold aman
+                filtered.append({
+                    "label": label,
+                    "confidence": round(conf * 100, 2)
+                })
+
+    detected_count = len(filtered)
+
+    # ===== SIMPAN HASIL PER ESP (BARU) =====
+    with ESP_LOCK:
+        ESP_RESULTS[esp_id] = detected_count
+
+    # ===== HITUNG TOTAL SEMUA ESP (BARU) =====
+    with ESP_LOCK:
+        total_all_esp = sum(ESP_RESULTS.values())
 
     # ===== RESPONSE JSON =====
     response = {
         "status": "ok",
+        "esp_id": esp_id,
         "filename": filename,
-        "total_detected": len(filtered),
+        "detected_this_esp": detected_count,
+        "total_detected_all_esp": total_all_esp,
+        "per_esp": ESP_RESULTS,
         "objects": filtered
     }
 
     return jsonify(response), 200
+
+
+# ================= SUMMARY ENDPOINT (BARU) =================
+@app.route("/summary", methods=["GET"])
+def summary():
+    with ESP_LOCK:
+        return jsonify({
+            "total_all_esp": sum(ESP_RESULTS.values()),
+            "per_esp": ESP_RESULTS
+        })
 
 
 # ================= RUN LOCAL (Render pakai gunicorn) =================
