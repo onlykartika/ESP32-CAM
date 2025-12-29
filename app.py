@@ -16,35 +16,34 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 # ================= PERSISTENT STORAGE =================
 ESP_RESULTS_FILE = "esp_results.json"
-ESP_RESULTS = {}  # { esp_id: detected_count }
+ESP_RESULTS = {}  # { esp_id: { count: int, last_update: int } }
 ESP_LOCK = Lock()
 
 def load_esp_results():
-    """Load ESP_RESULTS dari file JSON kalau ada"""
     if os.path.exists(ESP_RESULTS_FILE):
         try:
             with open(ESP_RESULTS_FILE, "r") as f:
                 data = json.load(f)
-                print(f"[INFO] Loaded ESP_RESULTS from file: {data}")
-                return data
+                if isinstance(data, dict):
+                    print("[INFO] ESP_RESULTS loaded from file")
+                    return data
         except Exception as e:
-            print(f"[ERROR] Gagal load esp_results.json: {e}")
+            print(f"[ERROR] Failed loading esp_results.json: {e}")
     return {}
 
 def save_esp_results():
-    """Simpan ESP_RESULTS ke file JSON"""
     try:
         with open(ESP_RESULTS_FILE, "w") as f:
             json.dump(ESP_RESULTS, f)
-        print(f"[INFO] Saved ESP_RESULTS to file: {ESP_RESULTS}")
+        print("[INFO] ESP_RESULTS saved")
     except Exception as e:
-        print(f"[ERROR] Gagal simpan esp_results.json: {e}")
+        print(f"[ERROR] Failed saving esp_results.json: {e}")
 
-# Load saat app mulai
 ESP_RESULTS = load_esp_results()
 
 # ================= ROBOFLOW (LAZY INIT) =================
 rf_client = None
+
 def get_rf_client():
     global rf_client
     if rf_client is None:
@@ -78,21 +77,19 @@ def upload():
     if not request.data:
         return jsonify({"error": "no image received"}), 400
 
-    # ===== ESP ID =====
     esp_id = request.headers.get("X-ESP-ID", "unknown")
-    print(f"[INFO] Upload dari ESP ID: {esp_id}")
+    print(f"[INFO] Upload from ESP: {esp_id}")
 
-    # ===== SIMPAN IMAGE SEMENTARA =====
     timestamp = int(time.time())
     filename = f"{esp_id}_{timestamp}.jpg"
+
     try:
         with open(filename, "wb") as f:
             f.write(request.data)
-        print(f"[INFO] Gambar disimpan sementara: {filename}")
     except Exception as e:
-        return jsonify({"error": "gagal simpan gambar", "detail": str(e)}), 500
+        return jsonify({"error": "failed to save image", "detail": str(e)}), 500
 
-    # ===== RUN ROBOFLOW =====
+    # ===== ROBOFLOW =====
     try:
         rf = get_rf_client()
         result = rf.run_workflow(
@@ -101,17 +98,17 @@ def upload():
             images={"image": filename},
             use_cache=False
         )
-        print("[INFO] Roboflow inference selesai")
     except Exception as e:
-        os.remove(filename)  # cleanup kalau gagal
+        os.remove(filename)
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
 
-    # ===== UPLOAD KE GITHUB (opsional, tetap coba) =====
+    # ===== UPLOAD TO GITHUB (BEST EFFORT) =====
     try:
         with open(filename, "rb") as f:
             content = base64.b64encode(f.read()).decode()
+
         put_url = f"{GITHUB_API}/{esp_id}/{filename}"
-        response = requests.put(
+        res = requests.put(
             put_url,
             headers=GITHUB_HEADERS,
             json={
@@ -120,22 +117,20 @@ def upload():
             },
             timeout=15
         )
-        if response.status_code in [200, 201]:
-            print("[INFO] Upload ke GitHub sukses")
-        else:
-            print(f"[WARNING] Upload GitHub gagal: {response.status_code} {response.text}")
-    except Exception as e:
-        print(f"[WARNING] Upload GitHub error: {str(e)}")
 
-    # ===== CLEANUP FILE SEMENTARA =====
+        if res.status_code not in (200, 201):
+            print(f"[WARN] GitHub upload failed: {res.status_code}")
+    except Exception as e:
+        print(f"[WARN] GitHub upload error: {e}")
+
     try:
         os.remove(filename)
-        print("[INFO] File sementara dihapus")
-    except Exception as e:
-        print(f"[WARNING] Gagal hapus file sementara: {e}")
+    except:
+        pass
 
-    # ===== PARSE HASIL ROBOFLOW =====
+    # ===== PARSE ROBOFLOW RESULT =====
     predictions = []
+
     if isinstance(result, dict) and "predictions" in result:
         predictions = result["predictions"]
     elif isinstance(result, list):
@@ -143,9 +138,9 @@ def upload():
             if isinstance(item, dict) and "predictions" in item:
                 predictions.extend(item["predictions"])
 
-    # ===== FILTER TARGET (juvenile lobster) =====
     TARGET_LABEL = "panulirus ornatus - juvenile"
     filtered = []
+
     for p in predictions:
         if not isinstance(p, dict):
             continue
@@ -159,19 +154,21 @@ def upload():
 
     detected_count = len(filtered)
 
-    # ===== SIMPAN HASIL KE GLOBAL + FILE =====
+    # ===== SAVE RESULT =====
     with ESP_LOCK:
-        ESP_RESULTS[esp_id] = detected_count
-        total_all_esp = sum(ESP_RESULTS.values())
-        save_esp_results()  # <--- Ini yang penting!
+        ESP_RESULTS[esp_id] = {
+            "count": detected_count,
+            "last_update": int(time.time() * 1000)
+        }
+        save_esp_results()
 
-    # ===== RESPONSE KE ESP =====
+    total_all = sum(v["count"] for v in ESP_RESULTS.values())
+
     return jsonify({
         "status": "ok",
         "esp_id": esp_id,
-        "filename": filename,
         "detected_this_esp": detected_count,
-        "total_detected_all_esp": total_all_esp,
+        "total_detected_all_esp": total_all,
         "per_esp": ESP_RESULTS,
         "objects": filtered
     }), 200
@@ -181,11 +178,11 @@ def upload():
 def summary():
     with ESP_LOCK:
         return jsonify({
-            "total_all_esp": sum(ESP_RESULTS.values()),
+            "total_all_esp": sum(v["count"] for v in ESP_RESULTS.values()),
             "per_esp": ESP_RESULTS
         })
 
-# ================= LOCAL RUN =================
+# ================= RUN =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
