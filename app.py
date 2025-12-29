@@ -2,14 +2,11 @@ import os
 import time
 import base64
 import requests
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from inference_sdk import InferenceHTTPClient
 
 # ================= FLASK APP =================
 app = Flask(__name__)
-
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ================= ENV =================
 ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY")
@@ -29,20 +26,16 @@ GITHUB_REPO = "onlykartika/ESP32-CAM"
 GITHUB_FOLDER = "images"
 
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
+
 GITHUB_HEADERS = {
     "Authorization": f"token {GITHUB_TOKEN}",
     "User-Agent": "Render-AI-Server"
 }
 
-# ================= HEALTH =================
-@app.route("/")
+# ================= HEALTH CHECK =================
+@app.route("/", methods=["GET"])
 def health():
     return "Render AI server running"
-
-# ================= STATIC IMAGE =================
-@app.route("/uploads/<filename>")
-def get_image(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
 
 # ================= IMAGE UPLOAD =================
 @app.route("/upload", methods=["POST"])
@@ -50,28 +43,27 @@ def upload():
     if not request.data:
         return jsonify({"error": "no image received"}), 400
 
+    # ===== SIMPAN IMAGE SEMENTARA =====
     timestamp = int(time.time())
     filename = f"{timestamp}.jpg"
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
 
-    # ===== SIMPAN FILE =====
-    with open(filepath, "wb") as f:
+    with open(filename, "wb") as f:
         f.write(request.data)
 
-    # ===== ROBOFLOW =====
+    # ===== RUN ROBOFLOW WORKFLOW =====
     try:
         result = client.run_workflow(
             workspace_name=WORKSPACE_NAME,
             workflow_id=WORKFLOW_ID,
-            images={"image": filepath},
+            images={"image": filename},
             use_cache=False
         )
     except Exception as e:
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
 
-    # ===== UPLOAD KE GITHUB =====
+    # ===== UPLOAD IMAGE KE GITHUB =====
     try:
-        with open(filepath, "rb") as f:
+        with open(filename, "rb") as f:
             content = base64.b64encode(f.read()).decode()
 
         requests.put(
@@ -86,36 +78,52 @@ def upload():
     except Exception as e:
         return jsonify({"error": "github upload failed", "detail": str(e)}), 500
 
-    # ===== PARSE HASIL =====
+    # ===== CLEANUP FILE LOKAL =====
+    try:
+        os.remove(filename)
+    except:
+        pass
+
+    # ===== PARSE HASIL (AMAN) =====
     predictions = []
-    if isinstance(result, list):
+
+    if isinstance(result, dict) and "predictions" in result:
+        predictions = result["predictions"]
+
+    elif isinstance(result, list):
         for item in result:
-            if "predictions" in item:
+            if isinstance(item, dict) and "predictions" in item:
                 predictions.extend(item["predictions"])
 
+    # ===== FILTER OBJEK TARGET =====
     TARGET_LABEL = "panulirus ornatus - juvenile"
-    filtered = [
-        {
-            "label": p.get("class"),
-            "confidence": round(p.get("confidence", 0) * 100, 2)
-        }
-        for p in predictions
-        if p.get("class", "").lower() == TARGET_LABEL.lower()
-    ]
+    filtered = []
 
-    # ===== RESPONSE =====
-    image_url = request.host_url + "uploads/" + filename
+    for p in predictions:
+        if not isinstance(p, dict):
+            continue
 
-    return jsonify({
+        label = p.get("class") or p.get("label")
+        conf = p.get("confidence") or p.get("score") or 0
+
+        if label and label.lower() == TARGET_LABEL.lower():
+            filtered.append({
+                "label": label,
+                "confidence": round(conf * 100, 2)
+            })
+
+    # ===== RESPONSE JSON =====
+    response = {
         "status": "ok",
         "filename": filename,
-        "image_url": image_url,
         "total_detected": len(filtered),
         "objects": filtered
-    }), 200
+    }
+
+    return jsonify(response), 200
 
 
-# ================= RUN =================
+# ================= RUN LOCAL (Render pakai gunicorn) =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
