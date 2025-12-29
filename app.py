@@ -13,11 +13,17 @@ app = Flask(__name__)
 ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
-# ================= ROBOFLOW =================
-client = InferenceHTTPClient(
-    api_url="https://serverless.roboflow.com",
-    api_key=ROBOFLOW_API_KEY
-)
+# ================= ROBOFLOW (LAZY INIT) =================
+rf_client = None
+
+def get_rf_client():
+    global rf_client
+    if rf_client is None:
+        rf_client = InferenceHTTPClient(
+            api_url="https://serverless.roboflow.com",
+            api_key=ROBOFLOW_API_KEY
+        )
+    return rf_client
 
 WORKSPACE_NAME = "my-workspace-grzes"
 WORKFLOW_ID = "detect-count-and-visualize"
@@ -33,9 +39,9 @@ GITHUB_HEADERS = {
     "User-Agent": "Render-AI-Server"
 }
 
-# ================= GLOBAL STORAGE (BARU) =================
-ESP_RESULTS = {}          # { esp_id: total_detected }
-ESP_LOCK = Lock()         # aman untuk request bersamaan
+# ================= GLOBAL STORAGE =================
+ESP_RESULTS = {}          # { esp_id: detected_count }
+ESP_LOCK = Lock()
 
 # ================= HEALTH CHECK =================
 @app.route("/", methods=["GET"])
@@ -48,19 +54,20 @@ def upload():
     if not request.data:
         return jsonify({"error": "no image received"}), 400
 
-    # ===== AMBIL ESP ID (BARU) =====
+    # ===== ESP ID =====
     esp_id = request.headers.get("X-ESP-ID", "unknown")
 
-    # ===== SIMPAN IMAGE SEMENTARA =====
+    # ===== SIMPAN IMAGE =====
     timestamp = int(time.time())
     filename = f"{esp_id}_{timestamp}.jpg"
 
     with open(filename, "wb") as f:
         f.write(request.data)
 
-    # ===== RUN ROBOFLOW WORKFLOW =====
+    # ===== RUN ROBOFLOW (AMAN UNTUK RENDER) =====
     try:
-        result = client.run_workflow(
+        rf = get_rf_client()
+        result = rf.run_workflow(
             workspace_name=WORKSPACE_NAME,
             workflow_id=WORKFLOW_ID,
             images={"image": filename},
@@ -69,7 +76,7 @@ def upload():
     except Exception as e:
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
 
-    # ===== UPLOAD IMAGE KE GITHUB (PER ESP) =====
+    # ===== UPLOAD KE GITHUB =====
     try:
         with open(filename, "rb") as f:
             content = base64.b64encode(f.read()).decode()
@@ -86,24 +93,23 @@ def upload():
     except Exception as e:
         return jsonify({"error": "github upload failed", "detail": str(e)}), 500
 
-    # ===== CLEANUP FILE LOKAL =====
+    # ===== CLEANUP =====
     try:
         os.remove(filename)
     except:
         pass
 
-    # ===== PARSE HASIL (AMAN) =====
+    # ===== PARSE HASIL =====
     predictions = []
 
     if isinstance(result, dict) and "predictions" in result:
         predictions = result["predictions"]
-
     elif isinstance(result, list):
         for item in result:
             if isinstance(item, dict) and "predictions" in item:
                 predictions.extend(item["predictions"])
 
-    # ===== FILTER OBJEK TARGET =====
+    # ===== FILTER TARGET =====
     TARGET_LABEL = "panulirus ornatus - juvenile"
     filtered = []
 
@@ -114,25 +120,21 @@ def upload():
         label = p.get("class") or p.get("label")
         conf = p.get("confidence") or p.get("score") or 0
 
-        if label and label.lower() == TARGET_LABEL.lower():
-            if conf >= 0.6:  # threshold aman
-                filtered.append({
-                    "label": label,
-                    "confidence": round(conf * 100, 2)
-                })
+        if label and label.lower() == TARGET_LABEL.lower() and conf >= 0.6:
+            filtered.append({
+                "label": label,
+                "confidence": round(conf * 100, 2)
+            })
 
     detected_count = len(filtered)
 
-    # ===== SIMPAN HASIL PER ESP (BARU) =====
+    # ===== SIMPAN HASIL PER ESP =====
     with ESP_LOCK:
         ESP_RESULTS[esp_id] = detected_count
-
-    # ===== HITUNG TOTAL SEMUA ESP (BARU) =====
-    with ESP_LOCK:
         total_all_esp = sum(ESP_RESULTS.values())
 
-    # ===== RESPONSE JSON =====
-    response = {
+    # ===== RESPONSE =====
+    return jsonify({
         "status": "ok",
         "esp_id": esp_id,
         "filename": filename,
@@ -140,12 +142,10 @@ def upload():
         "total_detected_all_esp": total_all_esp,
         "per_esp": ESP_RESULTS,
         "objects": filtered
-    }
-
-    return jsonify(response), 200
+    }), 200
 
 
-# ================= SUMMARY ENDPOINT (BARU) =================
+# ================= SUMMARY =================
 @app.route("/summary", methods=["GET"])
 def summary():
     with ESP_LOCK:
@@ -155,7 +155,7 @@ def summary():
         })
 
 
-# ================= RUN LOCAL (Render pakai gunicorn) =================
+# ================= LOCAL RUN =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
