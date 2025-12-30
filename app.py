@@ -26,7 +26,7 @@ ESP_RESULTS_FILE = "esp_results.json"
 ESP_RESULTS = {}
 ESP_LOCK = Lock()
 
-# ================= GITHUB (SATU REPO) =================
+# ================= GITHUB =================
 GITHUB_REPO = "onlykartika/ESP32-CAM"
 GITHUB_FOLDER = "images"
 GITHUB_API_ROOT = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
@@ -36,45 +36,44 @@ GITHUB_HEADERS = {
     "Accept": "application/vnd.github.v3+json"
 }
 
-# ================= LOAD/SAVE =================
+# ================= LOAD / SAVE =================
 def load_esp_results():
     global ESP_RESULTS
+
     if os.path.exists(ESP_RESULTS_FILE):
         try:
             with open(ESP_RESULTS_FILE, "r") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    ESP_RESULTS = data
-                    print("[INFO] Loaded results from local")
-        except Exception as e:
-            print(f"[ERROR] Load local failed: {e}")
+                ESP_RESULTS = json.load(f)
+                print("[INFO] Loaded local esp_results.json")
+        except:
+            ESP_RESULTS = {}
 
     try:
-        res = requests.get(f"{GITHUB_API_ROOT}/esp_results.json", headers=GITHUB_HEADERS, timeout=10)
+        res = requests.get(
+            f"{GITHUB_API_ROOT}/esp_results.json",
+            headers=GITHUB_HEADERS,
+            timeout=10
+        )
         if res.status_code == 200:
-            content = base64.b64decode(res.json()["content"]).decode("utf-8")
+            content = base64.b64decode(res.json()["content"]).decode()
             ESP_RESULTS = json.loads(content)
             save_esp_results()
-            print("[INFO] Loaded results from GitHub")
+            print("[INFO] Loaded esp_results.json from GitHub")
     except Exception as e:
-        print(f"[WARN] GitHub load failed: {e}")
+        print("[WARN] GitHub load failed:", e)
 
     if not isinstance(ESP_RESULTS, dict):
         ESP_RESULTS = {}
 
 def save_esp_results():
-    try:
-        with open(ESP_RESULTS_FILE, "w") as f:
-            json.dump(ESP_RESULTS, f, indent=2)
-        print("[INFO] Saved locally")
-    except Exception as e:
-        print(f"[ERROR] Save local failed: {e}")
+    with open(ESP_RESULTS_FILE, "w") as f:
+        json.dump(ESP_RESULTS, f, indent=2)
 
 load_esp_results()
 
-# ================= ROBOFLOW CLIENTS (DUA CLIENT TERPISAH) =================
+# ================= ROBOFLOW CLIENT (DUA CLIENT) =================
 rf_client_indukan = InferenceHTTPClient(
-    api_url="https://serverless.roboflow.com",  # atau https://detect.roboflow.com kalau pakai yang lama
+    api_url="https://serverless.roboflow.com",
     api_key=ROBOFLOW_API_KEY_INDUKAN
 )
 
@@ -83,13 +82,13 @@ rf_client_anakan = InferenceHTTPClient(
     api_key=ROBOFLOW_API_KEY_ANAKAN
 )
 
-# ================= KONFIGURASI KOLAM =================
+# ================= KOLAM CONFIG =================
 KOLAM_CONFIG = {
     "indukan": {
         "esp_ids": ["esp_5", "esp_6", "esp_7", "esp_8"],
         "client": rf_client_indukan,
-        "workspace": "my-workspace-rrwxa",                  # Ganti kalau perlu
-        "workflow": "detect-count-and-visualize",           # atau workflow ID kamu
+        "workspace": "my-workspace-rrwxa",
+        "workflow": "detect-count-and-visualize",
         "target_label": "female",
         "conf_threshold": 0.6,
         "folder": "kolam_indukan"
@@ -108,7 +107,7 @@ KOLAM_CONFIG = {
 # ================= ROUTES =================
 @app.route("/", methods=["GET"])
 def health():
-    return "AI Server LOVIA - DUA API KEY (Indukan & Anakan) - Running!"
+    return "AI Server – Dual Roboflow API – Running"
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -116,136 +115,134 @@ def upload():
         return jsonify({"error": "no image"}), 400
 
     esp_id = request.headers.get("X-ESP-ID", "unknown").lower()
-    print(f"[INFO] Upload dari ESP: {esp_id}")
+    print(f"[INFO] Upload dari {esp_id}")
 
-    # Tentukan kolam
-    if esp_id in KOLAM_CONFIG["indukan"]["esp_ids"]:
-        kolam = "indukan"
-    elif esp_id in KOLAM_CONFIG["anakan"]["esp_ids"]:
-        kolam = "anakan"
-    else:
-        return jsonify({"error": f"ESP_ID {esp_id} tidak dikenali"}), 400
+    # ================= PILIH KOLAM =================
+    kolam = None
+    for k, cfg in KOLAM_CONFIG.items():
+        if esp_id in cfg["esp_ids"]:
+            kolam = k
+            break
 
-    config = KOLAM_CONFIG[kolam]
-    client = config["client"]
-    print(f"[INFO] {esp_id} → Kolam {kolam.upper()} (workspace: {config['workspace']})")
+    if not kolam:
+        return jsonify({"error": "esp_id not registered"}), 400
 
-    timestamp = int(time.time())
-    filename = f"{esp_id}_{timestamp}.jpg"
+    cfg = KOLAM_CONFIG[kolam]
 
-    # Simpan sementara
+    # ================= SIMPAN IMAGE =================
+    ts = int(time.time())
+    filename = f"{esp_id}_{ts}.jpg"
+    with open(filename, "wb") as f:
+        f.write(request.data)
+
+    # ================= ROBOFLOW (FIXED) =================
     try:
-        with open(filename, "wb") as f:
-            f.write(request.data)
-    except Exception as e:
-        return jsonify({"error": "save failed"}), 500
+        with open(filename, "rb") as img:
+            image_bytes = img.read()
 
-    # Inference dengan client yang sesuai
-    try:
-        result = client.run_workflow(
-            workspace_name=config["workspace"],
-            workflow_id=config["workflow"],
-            images={"image": open(filename, "rb")},
+        result = cfg["client"].run_workflow(
+            workspace_name=cfg["workspace"],
+            workflow_id=cfg["workflow"],
+            images={"image": image_bytes},  # ✅ WAJIB BYTES
             use_cache=False
         )
     except Exception as e:
         os.remove(filename)
-        print(f"[ERROR] Roboflow inference ({kolam}): {e}")
-        return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
+        return jsonify({
+            "error": "roboflow failed",
+            "detail": str(e)
+        }), 500
 
-    # Upload gambar ke GitHub (opsional)
+    # ================= PARSE RESULT =================
+    predictions = []
+
+    if isinstance(result, list):
+        for r in result:
+            predictions.extend(r.get("predictions", []))
+    elif isinstance(result, dict):
+        predictions = result.get("predictions", [])
+
+    detected = []
+    for p in predictions:
+        label = p.get("class") or p.get("label")
+        conf = p.get("confidence") or p.get("score") or 0
+        if (
+            label
+            and label.lower() == cfg["target_label"].lower()
+            and conf >= cfg["conf_threshold"]
+        ):
+            detected.append({
+                "label": label,
+                "confidence": round(conf * 100, 2)
+            })
+
+    count = len(detected)
+
+    # ================= UPLOAD IMAGE TO GITHUB =================
     try:
         with open(filename, "rb") as f:
             content_b64 = base64.b64encode(f.read()).decode()
-        file_path = f"{GITHUB_FOLDER}/{config['folder']}/{esp_id}/{filename}"
-        put_url = f"{GITHUB_API_ROOT}/{file_path}"
-        res = requests.put(put_url, headers=GITHUB_HEADERS, json={
-            "message": f"Upload {esp_id} - {kolam}",
-            "content": content_b64,
-            "branch": "master"
-        }, timeout=15)
-        if res.status_code in (200, 201):
-            print(f"[INFO] Gambar uploaded: {file_path}")
+
+        put_url = f"{GITHUB_API_ROOT}/{GITHUB_FOLDER}/{cfg['folder']}/{filename}"
+
+        requests.put(
+            put_url,
+            headers=GITHUB_HEADERS,
+            json={
+                "message": f"upload {filename}",
+                "content": content_b64
+            },
+            timeout=15
+        )
     except Exception as e:
-        print(f"[WARN] Upload gambar gagal: {e}")
+        print("[WARN] GitHub upload failed:", e)
 
-    if os.path.exists(filename):
-        os.remove(filename)
+    os.remove(filename)
 
-    # Parse hasil deteksi
-    predictions = []
-    if isinstance(result, dict) and "predictions" in result:
-        predictions = result.get("predictions", [])
-    elif isinstance(result, list):
-        for item in result:
-            if isinstance(item, dict) and "predictions" in item:
-                predictions.extend(item["predictions"])
-
-    filtered = []
-    target_label_lower = config["target_label"].lower()
-    for p in predictions:
-        if not isinstance(p, dict):
-            continue
-        label = p.get("class") or p.get("label") or ""
-        conf = p.get("confidence") or p.get("score") or 0
-        if label.lower() == target_label_lower and conf >= config["conf_threshold"]:
-            filtered.append({"label": label, "confidence": round(conf * 100, 2)})
-
-    detected_count = len(filtered)
-
-    # Update hasil
+    # ================= UPDATE JSON =================
     with ESP_LOCK:
         ESP_RESULTS[esp_id] = {
+            "count": count,
             "kolam": kolam,
-            "count": detected_count,
             "last_update": int(time.time() * 1000)
         }
         save_esp_results()
 
-        # Backup ke GitHub
         try:
-            content_b64 = base64.b64encode(json.dumps(ESP_RESULTS, indent=2).encode()).decode()
-            get_res = requests.get(f"{GITHUB_API_ROOT}/esp_results.json", headers=GITHUB_HEADERS, timeout=10)
+            json_b64 = base64.b64encode(
+                json.dumps(ESP_RESULTS, indent=2).encode()
+            ).decode()
+
+            get_res = requests.get(
+                f"{GITHUB_API_ROOT}/esp_results.json",
+                headers=GITHUB_HEADERS
+            )
             sha = get_res.json().get("sha") if get_res.status_code == 200 else None
-            put_data = {
-                "message": "Update esp_results.json",
-                "content": content_b64,
-                "branch": "master"
+
+            payload = {
+                "message": "update esp_results.json",
+                "content": json_b64
             }
             if sha:
-                put_data["sha"] = sha
-            requests.put(f"{GITHUB_API_ROOT}/esp_results.json", headers=GITHUB_HEADERS, json=put_data, timeout=15)
-        except Exception as e:
-            print(f"[WARN] Backup JSON gagal: {e}")
+                payload["sha"] = sha
 
-        total_indukan = sum(ESP_RESULTS.get(esp, {}).get("count", 0) for esp in KOLAM_CONFIG["indukan"]["esp_ids"])
-        total_anakan = sum(ESP_RESULTS.get(esp, {}).get("count", 0) for esp in KOLAM_CONFIG["anakan"]["esp_ids"])
+            requests.put(
+                f"{GITHUB_API_ROOT}/esp_results.json",
+                headers=GITHUB_HEADERS,
+                json=payload
+            )
+        except Exception as e:
+            print("[WARN] GitHub JSON update failed:", e)
 
     return jsonify({
         "status": "ok",
         "esp_id": esp_id,
         "kolam": kolam,
-        "detected_this_upload": detected_count,
-        "total_indukan": total_indukan,
-        "total_anakan": total_anakan,
-        "total_semua": total_indukan + total_anakan,
-        "per_esp": ESP_RESULTS,
-        "objects": filtered
-    })
+        "detected": count,
+        "objects": detected
+    }), 200
 
 @app.route("/summary", methods=["GET"])
 def summary():
     with ESP_LOCK:
-        total_indukan = sum(ESP_RESULTS.get(esp, {}).get("count", 0) for esp in KOLAM_CONFIG["indukan"]["esp_ids"])
-        total_anakan = sum(ESP_RESULTS.get(esp, {}).get("count", 0) for esp in KOLAM_CONFIG["anakan"]["esp_ids"])
-        return jsonify({
-            "total_indukan": total_indukan,
-            "total_anakan": total_anakan,
-            "total_semua": total_indukan + total_anakan,
-            "per_esp": ESP_RESULTS,
-            "last_updated": int(time.time() * 1000)
-        })
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+        return jsonify(ESP_RESULTS)
