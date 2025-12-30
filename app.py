@@ -3,142 +3,78 @@ import time
 import json
 from flask import Flask, request, jsonify
 from inference_sdk import InferenceHTTPClient
-from threading import Lock
 
-# ================= FLASK =================
 app = Flask(__name__)
 
-# ================= ENV =================
-API_KEY_INDUKAN = os.environ.get("ROBOFLOW_API_KEY_INDUKAN")
-API_KEY_ANAKAN = os.environ.get("ROBOFLOW_API_KEY_ANAKAN")
+ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY_ANAKAN")
+if not ROBOFLOW_API_KEY:
+    raise ValueError("ROBOFLOW_API_KEY_ANAKAN not set")
 
-if not API_KEY_INDUKAN or not API_KEY_ANAKAN:
-    raise ValueError("Roboflow API keys required")
-
-# ================= ROBOFLOW CLIENT =================
-rf_indukan = InferenceHTTPClient(
-    api_url="https://serverless.roboflow.com",
-    api_key=API_KEY_INDUKAN
+# ===== Roboflow client =====
+rf = InferenceHTTPClient(
+    api_url="https://detect.roboflow.com",
+    api_key=ROBOFLOW_API_KEY
 )
 
-rf_anakan = InferenceHTTPClient(
-    api_url="https://serverless.roboflow.com",
-    api_key=API_KEY_ANAKAN
-)
+MODEL_ID_ANAKAN = "panulirus-ornatus-juvenile/1"
 
-# ================= STORAGE =================
-ESP_RESULTS_FILE = "esp_results.json"
-ESP_RESULTS = {}
-LOCK = Lock()
+# ===== storage =====
+RESULT_FILE = "esp_results.json"
+if not os.path.exists(RESULT_FILE):
+    with open(RESULT_FILE, "w") as f:
+        json.dump({}, f)
 
-if os.path.exists(ESP_RESULTS_FILE):
-    with open(ESP_RESULTS_FILE, "r") as f:
-        ESP_RESULTS = json.load(f)
-
-# ================= KONFIGURASI KOLAM =================
-KOLAM = {
-    "anakan": {
-        "esp_ids": ["esp_1", "esp_2", "esp_3", "esp_4"],
-        "client": rf_anakan,
-        "workspace": "my-workspace-grzes",
-        "workflow": "detect-count-and-visualize",
-        "label": "panulirus ornatus - juvenile",
-        "conf": 0.6
-    },
-    "indukan": {
-        "esp_ids": ["esp_5", "esp_6", "esp_7", "esp_8"],
-        "client": rf_indukan,
-        "workspace": "my-workspace-rrwxa",
-        "workflow": "detect-count-and-visualize",
-        "label": "female",
-        "conf": 0.6
-    }
-}
-
-# ================= ROUTES =================
 @app.route("/", methods=["GET"])
 def health():
-    return "AI Server OK — 2 Roboflow API, JSON Active"
+    return "OK"
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    if not request.data:
-        return jsonify({"error": "no image"}), 400
-
-    esp_id = request.headers.get("X-ESP-ID", "").lower()
-    print(f"[INFO] ESP upload: {esp_id}")
-
-    # Tentukan kolam
-    kolam_name = None
-    for k, v in KOLAM.items():
-        if esp_id in v["esp_ids"]:
-            kolam_name = k
-            break
-
-    if not kolam_name:
-        return jsonify({"error": "unknown esp id"}), 400
-
-    cfg = KOLAM[kolam_name]
-
-    # Simpan gambar
-    filename = f"{esp_id}_{int(time.time())}.jpg"
-    with open(filename, "wb") as f:
-        f.write(request.data)
-
-    # ===== ROBOFLOW INFERENCE (FILE PATH — AMAN) =====
     try:
-        result = cfg["client"].run_workflow(
-            workspace_name=cfg["workspace"],
-            workflow_id=cfg["workflow"],
-            images={"image": filename},
-            use_cache=False
+        raw = request.get_data()
+        if not raw or len(raw) < 1000:
+            return jsonify({"error": "image empty"}), 400
+
+        esp_id = request.headers.get("X-ESP-ID", "unknown")
+        ts = int(time.time())
+        filename = f"/tmp/{esp_id}_{ts}.jpg"
+
+        # ===== SIMPAN FILE =====
+        with open(filename, "wb") as f:
+            f.write(raw)
+
+        # ===== INFERENCE =====
+        result = rf.infer(
+            filename,
+            model_id=MODEL_ID_ANAKAN,
+            confidence=0.5
         )
-    except Exception as e:
-        os.remove(filename)
-        print("[ERROR] Roboflow:", e)
-        return jsonify({"error": "roboflow failed"}), 500
 
-    os.remove(filename)
+        detections = result.get("predictions", [])
+        count = len(detections)
 
-    # ===== PARSE RESULT =====
-    predictions = []
-    if isinstance(result, list):
-        for r in result:
-            predictions.extend(r.get("predictions", []))
-    elif isinstance(result, dict):
-        predictions = result.get("predictions", [])
+        # ===== SIMPAN JSON =====
+        with open(RESULT_FILE, "r") as f:
+            data = json.load(f)
 
-    detected = [
-        p for p in predictions
-        if (p.get("class") or p.get("label")) == cfg["label"]
-        and (p.get("confidence", 0) >= cfg["conf"])
-    ]
-
-    count = len(detected)
-
-    # ===== SAVE JSON =====
-    with LOCK:
-        ESP_RESULTS[esp_id] = {
-            "kolam": kolam_name,
+        data[esp_id] = {
             "count": count,
             "last_update": int(time.time() * 1000)
         }
-        with open(ESP_RESULTS_FILE, "w") as f:
-            json.dump(ESP_RESULTS, f, indent=2)
 
-    return jsonify({
-        "status": "ok",
-        "esp_id": esp_id,
-        "kolam": kolam_name,
-        "detected": count,
-        "all": ESP_RESULTS
-    })
+        with open(RESULT_FILE, "w") as f:
+            json.dump(data, f)
 
-@app.route("/summary", methods=["GET"])
-def summary():
-    return jsonify(ESP_RESULTS)
+        return jsonify({
+            "status": "ok",
+            "esp_id": esp_id,
+            "count": count
+        })
 
-# ================= RUN =================
+    except Exception as e:
+        print("SERVER ERROR:", e)
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
