@@ -10,7 +10,6 @@ ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY_ANAKAN")
 if not ROBOFLOW_API_KEY:
     raise ValueError("ROBOFLOW_API_KEY_ANAKAN not set")
 
-# ===== Roboflow client =====
 rf = InferenceHTTPClient(
     api_url="https://detect.roboflow.com",
     api_key=ROBOFLOW_API_KEY
@@ -18,7 +17,6 @@ rf = InferenceHTTPClient(
 
 MODEL_ID_ANAKAN = "panulirus-ornatus-juvenile/1"
 
-# ===== storage =====
 RESULT_FILE = "esp_results.json"
 if not os.path.exists(RESULT_FILE):
     with open(RESULT_FILE, "w") as f:
@@ -39,21 +37,18 @@ def upload():
         ts = int(time.time())
         filename = f"/tmp/{esp_id}_{ts}.jpg"
 
-        # ===== SIMPAN FILE =====
         with open(filename, "wb") as f:
             f.write(raw)
 
-        # ===== INFERENCE =====
+        # 🔥 INFERENCE (TANPA confidence)
         result = rf.infer(
             filename,
-            model_id=MODEL_ID_ANAKAN,
-            confidence=0.5
+            model_id=MODEL_ID_ANAKAN
         )
 
         detections = result.get("predictions", [])
         count = len(detections)
 
-        # ===== SIMPAN JSON =====
         with open(RESULT_FILE, "r") as f:
             data = json.load(f)
 
