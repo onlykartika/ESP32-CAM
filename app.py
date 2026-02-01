@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify
 from inference_sdk import InferenceHTTPClient
 from threading import Lock
 
-# ================= FLASK APP ===============
+# ================= FLASK APP =================
 app = Flask(__name__)
 
 # ================= ENV =================
@@ -98,7 +98,7 @@ def get_rf_client():
 WORKSPACE_NAME = "my-workspace-grzes"
 WORKFLOW_ID = "detect-count-and-visualize"
 TARGET_LABEL = "panulirus ornatus - puerulus"
-CONF_THRESHOLD = 0.4  # Diturunkan untuk tes, bisa naik lagi ke 0.6 kalau sudah yakin
+CONF_THRESHOLD = 0.4  # Diturunkan biar lebih mudah detect, bisa naik lagi ke 0.6
 
 # ================= HEALTH CHECK =================
 @app.route("/", methods=["GET"])
@@ -135,7 +135,7 @@ def upload():
         )
         print("[INFO] Roboflow workflow selesai")
 
-        # DEBUG: Print raw result supaya bisa dicek di Render Logs
+        # DEBUG: Print raw result supaya kelihatan di Render Logs
         print("[DEBUG] Raw result type:", type(result))
         try:
             print("[DEBUG] Raw result:", json.dumps(result, indent=2, default=str))
@@ -171,31 +171,33 @@ def upload():
     if os.path.exists(filename):
         os.remove(filename)
 
-    # ===== PARSE PREDICTIONS (versi robust) =====
-    predictions = []
+    # ===== PARSE PREDICTIONS - PERSIS SEPERTI DI COLAB KAMU =====
+    predictions_list = None
 
-    # Coba ambil dari berbagai kemungkinan struktur output
-    if isinstance(result, dict):
-        if "predictions" in result:
-            predictions = result["predictions"]
-        elif "model_predictions" in result and "predictions" in result["model_predictions"]:
-            predictions = result["model_predictions"]["predictions"]
-    elif isinstance(result, list) and len(result) > 0:
-        first_item = result[0]
-        if isinstance(first_item, dict) and "predictions" in first_item:
-            predictions = first_item["predictions"]
+    # Extract raw predictions dari berbagai kemungkinan struktur
+    raw_predictions_output = None
+    if isinstance(result, dict) and "predictions" in result:
+        raw_predictions_output = result["predictions"]
+    elif isinstance(result, list) and result and "predictions" in result[0]:
+        raw_predictions_output = result[0]["predictions"]
+
+    # Normalisasi jadi list of prediction objects
+    if raw_predictions_output:
+        if isinstance(raw_predictions_output, list):
+            predictions_list = raw_predictions_output
+        elif isinstance(raw_predictions_output, dict) and "predictions" in raw_predictions_output:
+            predictions_list = raw_predictions_output["predictions"]
 
     filtered = []
-    for p in predictions:
-        if not isinstance(p, dict):
-            continue
-        label = p.get("class") or p.get("label") or ""
-        conf = p.get("confidence") or p.get("score") or 0.0
-        if label and label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
-            filtered.append({
-                "label": label,
-                "confidence": round(conf * 100, 2)
-            })
+    if predictions_list:
+        for p in predictions_list:
+            label = p.get("class") or p.get("label") or "obj"
+            conf = p.get("confidence") or p.get("score") or 0.0
+            if label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
+                filtered.append({
+                    "label": label,
+                    "confidence": round(conf * 100, 2)
+                })
 
     detected_count = len(filtered)
 
