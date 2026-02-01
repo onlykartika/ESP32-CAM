@@ -34,7 +34,7 @@ GITHUB_HEADERS = {
     "Accept": "application/vnd.github.v3+json"
 }
 
-# ================= SAVE FUNCTION (INI YANG HILANG SEBELUMNYA) =================
+# ================= SAVE FUNCTION =================
 def save_esp_results():
     try:
         with open(ESP_RESULTS_FILE, "w") as f:
@@ -98,7 +98,7 @@ def get_rf_client():
 WORKSPACE_NAME = "my-workspace-grzes"
 WORKFLOW_ID = "detect-count-and-visualize"
 TARGET_LABEL = "panulirus ornatus - puerulus"
-CONF_THRESHOLD = 0.6
+CONF_THRESHOLD = 0.4  # Diturunkan untuk tes, bisa naik lagi ke 0.6 kalau sudah yakin
 
 # ================= HEALTH CHECK =================
 @app.route("/", methods=["GET"])
@@ -134,6 +134,14 @@ def upload():
             use_cache=False
         )
         print("[INFO] Roboflow workflow selesai")
+
+        # DEBUG: Print raw result supaya bisa dicek di Render Logs
+        print("[DEBUG] Raw result type:", type(result))
+        try:
+            print("[DEBUG] Raw result:", json.dumps(result, indent=2, default=str))
+        except Exception as debug_err:
+            print("[DEBUG] Gagal dump result:", str(debug_err))
+
     except Exception as e:
         if os.path.exists(filename):
             os.remove(filename)
@@ -163,21 +171,26 @@ def upload():
     if os.path.exists(filename):
         os.remove(filename)
 
-    # ===== PARSE PREDICTIONS =====
+    # ===== PARSE PREDICTIONS (versi robust) =====
     predictions = []
-    if isinstance(result, dict) and "predictions" in result:
-        predictions = result["predictions"]
-    elif isinstance(result, list):
-        for item in result:
-            if isinstance(item, dict) and "predictions" in item:
-                predictions.extend(item["predictions"])
+
+    # Coba ambil dari berbagai kemungkinan struktur output
+    if isinstance(result, dict):
+        if "predictions" in result:
+            predictions = result["predictions"]
+        elif "model_predictions" in result and "predictions" in result["model_predictions"]:
+            predictions = result["model_predictions"]["predictions"]
+    elif isinstance(result, list) and len(result) > 0:
+        first_item = result[0]
+        if isinstance(first_item, dict) and "predictions" in first_item:
+            predictions = first_item["predictions"]
 
     filtered = []
     for p in predictions:
         if not isinstance(p, dict):
             continue
-        label = p.get("class") or p.get("label")
-        conf = p.get("confidence") or p.get("score") or 0
+        label = p.get("class") or p.get("label") or ""
+        conf = p.get("confidence") or p.get("score") or 0.0
         if label and label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
             filtered.append({
                 "label": label,
@@ -192,7 +205,7 @@ def upload():
             "count": detected_count,
             "last_update": int(time.time() * 1000)
         }
-        save_esp_results()  # ← Sekarang aman, fungsi sudah didefinisikan
+        save_esp_results()  # simpan lokal
 
         # Push ke GitHub
         try:
