@@ -34,9 +34,19 @@ GITHUB_HEADERS = {
     "Accept": "application/vnd.github.v3+json"
 }
 
+# ================= SAVE FUNCTION (INI YANG HILANG SEBELUMNYA) =================
+def save_esp_results():
+    try:
+        with open(ESP_RESULTS_FILE, "w") as f:
+            json.dump(ESP_RESULTS, f, indent=2)
+        print("[INFO] ESP_RESULTS saved to local file")
+    except Exception as e:
+        print(f"[ERROR] Failed saving local esp_results.json: {e}")
+
+# ================= LOAD FUNCTION =================
 def load_esp_results():
     global ESP_RESULTS
-    # 1. Coba load dari file lokal
+    # 1. Load dari lokal dulu
     if os.path.exists(ESP_RESULTS_FILE):
         try:
             with open(ESP_RESULTS_FILE, "r") as f:
@@ -66,11 +76,12 @@ def load_esp_results():
     except Exception as e:
         print(f"[WARN] Failed loading esp_results.json from GitHub: {e}")
 
-    # 3. Mulai dari kosong
+    # 3. Kosongkan kalau gagal semua
     ESP_RESULTS = {}
-    print("[INFO] ESP_RESULTS initialized as empty dict")
+    print("[INFO] ESP_RESULTS initialized as empty")
 
-load_esp_results()  # Load saat start
+# Load saat app start
+load_esp_results()
 
 # ================= ROBOFLOW =================
 rf_client = None
@@ -87,7 +98,7 @@ def get_rf_client():
 WORKSPACE_NAME = "my-workspace-grzes"
 WORKFLOW_ID = "detect-count-and-visualize"
 TARGET_LABEL = "panulirus ornatus - puerulus"
-CONF_THRESHOLD = 0.6  # Bisa diubah ke 0.4 kalau masih 0
+CONF_THRESHOLD = 0.6
 
 # ================= HEALTH CHECK =================
 @app.route("/", methods=["GET"])
@@ -123,13 +134,9 @@ def upload():
             use_cache=False
         )
         print("[INFO] Roboflow workflow selesai")
-
-        # DEBUG: Print raw result supaya kelihatan di Render Logs
-        print("[DEBUG] Raw result type:", type(result))
-        print("[DEBUG] Raw result:", json.dumps(result, indent=2, default=str))
-
     except Exception as e:
-        os.remove(filename)
+        if os.path.exists(filename):
+            os.remove(filename)
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
 
     # ===== UPLOAD GAMBAR KE GITHUB =====
@@ -153,32 +160,24 @@ def upload():
     except Exception as e:
         print(f"[WARN] GitHub image upload error: {e}")
 
-    # Hapus file sementara
     if os.path.exists(filename):
         os.remove(filename)
 
-    # ===== PARSE PREDICTIONS (robust seperti Colab) =====
+    # ===== PARSE PREDICTIONS =====
     predictions = []
-
-    # Extract predictions dari struktur yang mungkin
-    raw_predictions = None
     if isinstance(result, dict) and "predictions" in result:
-        raw_predictions = result["predictions"]
-    elif isinstance(result, list) and len(result) > 0 and "predictions" in result[0]:
-        raw_predictions = result[0]["predictions"]
-
-    if raw_predictions:
-        if isinstance(raw_predictions, list):
-            predictions = raw_predictions
-        elif isinstance(raw_predictions, dict) and "predictions" in raw_predictions:
-            predictions = raw_predictions["predictions"]
+        predictions = result["predictions"]
+    elif isinstance(result, list):
+        for item in result:
+            if isinstance(item, dict) and "predictions" in item:
+                predictions.extend(item["predictions"])
 
     filtered = []
     for p in predictions:
         if not isinstance(p, dict):
             continue
-        label = p.get("class") or p.get("label") or ""
-        conf = p.get("confidence") or p.get("score") or 0.0
+        label = p.get("class") or p.get("label")
+        conf = p.get("confidence") or p.get("score") or 0
         if label and label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
             filtered.append({
                 "label": label,
@@ -193,7 +192,7 @@ def upload():
             "count": detected_count,
             "last_update": int(time.time() * 1000)
         }
-        save_esp_results()  # lokal
+        save_esp_results()  # ← Sekarang aman, fungsi sudah didefinisikan
 
         # Push ke GitHub
         try:
