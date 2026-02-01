@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify
 from inference_sdk import InferenceHTTPClient
 from threading import Lock
 
-# ================= FLASK APP =================
+# ================= FLASK APP ===============
 app = Flask(__name__)
 
 # ================= ENV =================
