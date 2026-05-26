@@ -91,7 +91,7 @@ def get_rf_client():
 
 WORKSPACE_NAME = "my-workspace-grzes"
 WORKFLOW_ID    = "detect-count-and-visualize"
-TARGET_LABEL   = "panulirus ornatus - puerulus"  # sesuaikan dengan label di model kamu
+TARGET_LABEL   = "panulirus ornatus - juvenile"  # sesuaikan dengan label di model kamu
 CONF_THRESHOLD = 0.4
 
 # ================= HELPER: PARSE PREDICTIONS =================
