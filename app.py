@@ -23,11 +23,11 @@ ESP_RESULTS      = {}
 ESP_LOCK         = Lock()
 
 # ================= GITHUB CONFIG =================
-GITHUB_REPO        = "onlykartika/ESP32-CAM"
-GITHUB_FOLDER      = "images"
-GITHUB_API_IMAGES  = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
-GITHUB_API_ROOT    = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
-GITHUB_HEADERS     = {
+GITHUB_REPO       = "onlykartika/ESP32-CAM"
+GITHUB_FOLDER     = "images"
+GITHUB_API_IMAGES = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
+GITHUB_API_ROOT   = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
+GITHUB_HEADERS    = {
     "Authorization": f"token {GITHUB_TOKEN}",
     "User-Agent":    "Render-AI-Server",
     "Accept":        "application/vnd.github.v3+json"
@@ -70,7 +70,7 @@ def load_esp_results():
         else:
             print(f"[WARN] esp_results.json not found on GitHub (status {res.status_code})")
     except Exception as e:
-        print(f"[WARN] Failed loading esp_results.json from GitHub: {e}")
+        print(f"[WARN] Failed loading from GitHub: {e}")
 
     ESP_RESULTS = {}
     print("[INFO] ESP_RESULTS initialized as empty")
@@ -89,62 +89,32 @@ def get_rf_client():
         )
     return rf_client
 
-WORKSPACE_NAME  = "my-workspace-grzes"
-WORKFLOW_ID     = "detect-count-and-visualize"
-TARGET_LABEL    = "panulirus ornatus - puerulus"
-CONF_THRESHOLD  = 0.4
+WORKSPACE_NAME = "my-workspace-grzes"
+WORKFLOW_ID    = "detect-count-and-visualize"
+TARGET_LABEL   = "panulirus ornatus - puerulus"  # sesuaikan dengan label di model kamu
+CONF_THRESHOLD = 0.4
 
 # ================= HELPER: PARSE PREDICTIONS =================
+# Logika SAMA PERSIS dengan Colab yang berhasil
 def parse_predictions(result):
-    """
-    Roboflow Workflow result bisa bermacam struktur.
-    Fungsi ini mencoba semua kemungkinan dan return list of dict:
-    [{"label": str, "confidence": float}, ...]
-    """
-    all_preds = []
+    raw = None
+    if isinstance(result, dict) and "predictions" in result:
+        raw = result["predictions"]
+    elif isinstance(result, list) and result and "predictions" in result[0]:
+        raw = result[0]["predictions"]
 
-    # Normalisasi ke list
-    results = result if isinstance(result, list) else [result]
+    predictions_list = []
+    if isinstance(raw, list):
+        predictions_list = raw
+    elif isinstance(raw, dict) and "predictions" in raw:
+        predictions_list = raw["predictions"]
 
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-
-        # ---- Coba semua key yang mungkin berisi predictions ----
-        candidates = []
-
-        # Langsung di root
-        for key in ("predictions", "output", "outputs", "detections"):
-            if key in item:
-                candidates.append(item[key])
-
-        # Nested satu level (misal item["predictions"]["predictions"])
-        for key in ("predictions", "output"):
-            if key in item and isinstance(item[key], dict):
-                inner = item[key]
-                for inner_key in ("predictions", "detections", "output"):
-                    if inner_key in inner:
-                        candidates.append(inner[inner_key])
-
-        # Proses setiap kandidat
-        for candidate in candidates:
-            if isinstance(candidate, list):
-                for p in candidate:
-                    if isinstance(p, dict):
-                        all_preds.append(p)
-            elif isinstance(candidate, dict):
-                # Mungkin dict of predictions
-                for p in candidate.values():
-                    if isinstance(p, dict):
-                        all_preds.append(p)
-
-    print(f"[DEBUG] Total raw predictions found: {len(all_preds)}")
-    return all_preds
+    return predictions_list
 
 # ================= HEALTH CHECK =================
 @app.route("/", methods=["GET"])
 def health():
-    return "Render AI server running - with GitHub persistent backup"
+    return "Render AI server running"
 
 # ================= IMAGE UPLOAD =================
 @app.route("/upload", methods=["POST"])
@@ -156,12 +126,15 @@ def upload():
     timestamp = int(time.time())
     filename  = f"{esp_id}_{timestamp}.jpg"
 
-    print(f"[INFO] Upload from ESP: {esp_id}, size: {len(request.data)} bytes")
+    print(f"[INFO] Upload dari ESP: {esp_id}, ukuran: {len(request.data)} bytes")
 
-    # Simpan sementara
+    # ===== SIMPAN GAMBAR KE DISK =====
+    # KUNCI: simpan dulu ke file, lalu kirim file path ke Roboflow
+    # persis seperti di Colab (bukan kirim bytes langsung)
     try:
         with open(filename, "wb") as f:
             f.write(request.data)
+        print(f"[INFO] Gambar disimpan: {filename}")
     except Exception as e:
         return jsonify({"error": "failed to save image", "detail": str(e)}), 500
 
@@ -169,22 +142,23 @@ def upload():
     result = None
     try:
         rf     = get_rf_client()
+
+        # Kirim FILE PATH — sama seperti Colab yang berhasil
         result = rf.run_workflow(
             workspace_name=WORKSPACE_NAME,
             workflow_id=WORKFLOW_ID,
-            images={"image": filename},
+            images={"image": filename},  # file path, bukan bytes
             use_cache=True
         )
-        print("[INFO] Roboflow workflow selesai")
 
-        # DEBUG: print full result ke Render Logs
+        print("[INFO] Roboflow selesai")
         try:
             print("[DEBUG] Raw result:\n" + json.dumps(result, indent=2, default=str))
         except Exception:
-            print("[DEBUG] Raw result (non-serializable):", str(result))
+            print("[DEBUG] Raw result:", str(result))
 
     except Exception as e:
-        print(f"[ERROR] Roboflow failed: {e}")
+        print(f"[ERROR] Roboflow gagal: {e}")
         if os.path.exists(filename):
             os.remove(filename)
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
@@ -192,47 +166,43 @@ def upload():
     # ===== UPLOAD GAMBAR KE GITHUB =====
     try:
         with open(filename, "rb") as f:
-            content = base64.b64encode(f.read()).decode()
+            img_content = base64.b64encode(f.read()).decode()
         put_url = f"{GITHUB_API_IMAGES}/{esp_id}/{filename}"
         res = requests.put(
             put_url,
             headers=GITHUB_HEADERS,
             json={
                 "message": f"upload from {esp_id} ({filename})",
-                "content": content
+                "content": img_content
             },
             timeout=15
         )
         if res.status_code in (200, 201):
-            print(f"[INFO] Image {filename} uploaded to GitHub")
+            print(f"[INFO] Gambar {filename} berhasil ke GitHub")
         else:
-            print(f"[WARN] GitHub image upload failed: {res.status_code} - {res.text}")
+            print(f"[WARN] GitHub upload gagal: {res.status_code} - {res.text}")
     except Exception as e:
-        print(f"[WARN] GitHub image upload error: {e}")
+        print(f"[WARN] GitHub upload error: {e}")
 
+    # Hapus file sementara
     if os.path.exists(filename):
         os.remove(filename)
 
-    # ===== PARSE PREDICTIONS =====
-    all_preds = parse_predictions(result)
+    # ===== PARSE PREDICTIONS — logika sama dengan Colab =====
+    predictions_list = parse_predictions(result)
 
-    # DEBUG: print semua label yang terdeteksi
-    print("[DEBUG] Semua label terdeteksi:")
-    for p in all_preds:
-        lbl  = p.get("class") or p.get("label") or p.get("class_name") or "unknown"
+    # Debug: print semua label yang terdeteksi
+    print(f"[DEBUG] Total predictions: {len(predictions_list)}")
+    for p in predictions_list:
+        lbl  = p.get("class") or p.get("label") or "unknown"
         conf = p.get("confidence") or p.get("score") or 0.0
-        print(f"   → {lbl} ({conf*100:.1f}%)")
+        print(f"   → {lbl} ({float(conf)*100:.1f}%)")
 
     # Filter sesuai target
     filtered = []
-    for p in all_preds:
-        label = (
-            p.get("class") or
-            p.get("label") or
-            p.get("class_name") or
-            "unknown"
-        )
-        conf = float(p.get("confidence") or p.get("score") or 0.0)
+    for p in predictions_list:
+        label = p.get("class") or p.get("label") or "unknown"
+        conf  = float(p.get("confidence") or p.get("score") or 0.0)
         if label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
             filtered.append({
                 "label":      label,
@@ -240,7 +210,7 @@ def upload():
             })
 
     detected_count = len(filtered)
-    print(f"[INFO] Detected '{TARGET_LABEL}': {detected_count}")
+    print(f"[INFO] '{TARGET_LABEL}' terdeteksi: {detected_count}")
 
     # ===== UPDATE & SAVE RESULT =====
     with ESP_LOCK:
@@ -252,11 +222,10 @@ def upload():
 
         # Push ke GitHub
         try:
-            json_filename = "esp_results.json"
-            json_content  = json.dumps(ESP_RESULTS).encode("utf-8")
-            content_b64   = base64.b64encode(json_content).decode("utf-8")
+            json_content = json.dumps(ESP_RESULTS).encode("utf-8")
+            content_b64  = base64.b64encode(json_content).decode("utf-8")
 
-            get_url = f"{GITHUB_API_ROOT}/{json_filename}"
+            get_url = f"{GITHUB_API_ROOT}/esp_results.json"
             get_res = requests.get(get_url, headers=GITHUB_HEADERS, timeout=10)
             sha     = get_res.json().get("sha") if get_res.status_code == 200 else None
 
@@ -268,27 +237,27 @@ def upload():
                 put_data["sha"] = sha
 
             put_res = requests.put(
-                f"{GITHUB_API_ROOT}/{json_filename}",
+                f"{GITHUB_API_ROOT}/esp_results.json",
                 headers=GITHUB_HEADERS,
                 json=put_data,
                 timeout=15
             )
             if put_res.status_code in (200, 201):
-                print("[INFO] esp_results.json successfully uploaded to GitHub")
+                print("[INFO] esp_results.json berhasil ke GitHub")
             else:
-                print(f"[WARN] GitHub JSON upload failed: {put_res.status_code} {put_res.text}")
+                print(f"[WARN] GitHub JSON upload gagal: {put_res.status_code} {put_res.text}")
         except Exception as e:
             print(f"[WARN] GitHub JSON upload error: {e}")
 
     total_all = sum(v["count"] for v in ESP_RESULTS.values())
 
     return jsonify({
-        "status":                  "ok",
-        "esp_id":                  esp_id,
-        "detected_this_esp":       detected_count,
-        "total_detected_all_esp":  total_all,
-        "per_esp":                 ESP_RESULTS,
-        "objects":                 filtered
+        "status":                 "ok",
+        "esp_id":                 esp_id,
+        "detected_this_esp":      detected_count,
+        "total_detected_all_esp": total_all,
+        "per_esp":                ESP_RESULTS,
+        "objects":                filtered
     }), 200
 
 # ================= SUMMARY =================
@@ -299,19 +268,6 @@ def summary():
             "total_all_esp": sum(v["count"] for v in ESP_RESULTS.values()),
             "per_esp":       ESP_RESULTS
         })
-
-# ================= DEBUG ENDPOINT =================
-@app.route("/test-roboflow", methods=["GET"])
-def test_roboflow():
-    """
-    Endpoint untuk test koneksi Roboflow tanpa kirim gambar.
-    Hit: GET /test-roboflow
-    """
-    try:
-        rf = get_rf_client()
-        return jsonify({"status": "ok", "message": "Roboflow client berhasil dibuat"})
-    except Exception as e:
-        return jsonify({"status": "error", "detail": str(e)}), 500
 
 # ================= RUN =================
 if __name__ == "__main__":
