@@ -80,7 +80,7 @@ load_esp_results()
 # ================= ROBOFLOW =================
 WORKSPACE_NAME = "my-workspace-grzes"
 WORKFLOW_ID    = "detect-count-and-visualize"
-TARGET_LABEL   = "panulirus ornatus - juvenile"
+TARGET_LABEL   = "juvenile"
 CONF_THRESHOLD = 0.4
 
 rf_client = None
