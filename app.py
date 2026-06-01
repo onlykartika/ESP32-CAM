@@ -78,7 +78,7 @@ def load_esp_results():
 load_esp_results()
 
 # ================= ROBOFLOW =================
-WORKSPACE_NAME = "my-workspace-grzes"
+WORKSPACE_NAME = "bocil-musik"
 WORKFLOW_ID    = "detect-count-and-visualize"
 TARGET_LABEL   = "juvenile"
 CONF_THRESHOLD = 0.4
