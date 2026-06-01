@@ -8,3 +8,4 @@ dataclasses-json
 pydantic
 tqdm
 urllib3
+gunicorn
