@@ -94,13 +94,8 @@ def get_rf_client():
         )
     return rf_client
 
-# ================= ROBOFLOW VIA REST API (fallback jika SDK gagal) =================
-# Sama persis seperti Colab — kirim langsung via HTTP tanpa SDK
+# ================= ROBOFLOW VIA REST API (fallback) =================
 def run_roboflow_rest(image_bytes):
-    """
-    Kirim gambar ke Roboflow Workflow via REST API langsung.
-    Ini identik dengan yang dipakai Colab di balik layar.
-    """
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
     url = f"https://serverless.roboflow.com/{WORKSPACE_NAME}/{WORKFLOW_ID}"
@@ -128,7 +123,6 @@ def run_roboflow_rest(image_bytes):
 
 # ================= PARSE PREDICTIONS =================
 def parse_predictions(result):
-    """Sama persis dengan logika Colab yang berhasil"""
     raw = None
     if isinstance(result, dict) and "predictions" in result:
         raw = result["predictions"]
@@ -142,12 +136,14 @@ def parse_predictions(result):
     return []
 
 # ================= HEALTH CHECK =================
+# PENTING: endpoint ini HARUS response cepat (< 2 detik)
+# ESP32 ping endpoint ini untuk wake up Render dari cold start
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({
-        "status":          "ok",
-        "target_label":    TARGET_LABEL,
-        "conf_threshold":  CONF_THRESHOLD
+        "status":         "ok",
+        "target_label":   TARGET_LABEL,
+        "conf_threshold": CONF_THRESHOLD
     })
 
 # ================= IMAGE UPLOAD =================
@@ -182,7 +178,6 @@ def upload():
     result = None
     method_used = ""
 
-    # Metode 1: SDK (sama seperti Colab)
     try:
         rf     = get_rf_client()
         result = rf.run_workflow(
@@ -201,7 +196,6 @@ def upload():
     except Exception as sdk_err:
         print(f"[WARN] SDK gagal: {sdk_err} — mencoba REST API...")
 
-        # Metode 2: REST API langsung (fallback)
         try:
             result      = run_roboflow_rest(image_data)
             method_used = "REST"
