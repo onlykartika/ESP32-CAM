@@ -3,7 +3,6 @@ import time
 import base64
 import json
 import requests
-import tempfile
 from flask import Flask, request, jsonify
 from inference_sdk import InferenceHTTPClient
 from threading import Lock
@@ -26,22 +25,22 @@ ESP_LOCK         = Lock()
 # ================= GITHUB CONFIG =================
 GITHUB_REPO       = "onlykartika/ESP32-CAM"
 GITHUB_FOLDER     = "images"
-GITHUB_API_IMAGES = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
 GITHUB_API_ROOT   = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
+GITHUB_API_IMAGES = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
 GITHUB_HEADERS    = {
     "Authorization": f"token {GITHUB_TOKEN}",
     "User-Agent":    "Render-AI-Server",
     "Accept":        "application/vnd.github.v3+json"
 }
 
-# ================= SAVE / LOAD =================
+# ================= LOAD / SAVE =================
 def save_esp_results():
     try:
         with open(ESP_RESULTS_FILE, "w") as f:
             json.dump(ESP_RESULTS, f, indent=2)
-        print("[INFO] ESP_RESULTS saved")
+        print("[INFO] Saved esp_results locally")
     except Exception as e:
-        print(f"[ERROR] Failed saving: {e}")
+        print(f"[ERROR] Save local failed: {e}")
 
 def load_esp_results():
     global ESP_RESULTS
@@ -51,10 +50,10 @@ def load_esp_results():
                 data = json.load(f)
                 if isinstance(data, dict):
                     ESP_RESULTS = data
-                    print("[INFO] ESP_RESULTS loaded from local")
+                    print("[INFO] Loaded esp_results from local file")
                     return
         except Exception as e:
-            print(f"[ERROR] Failed loading local: {e}")
+            print(f"[ERROR] Failed load local: {e}")
 
     try:
         res = requests.get(
@@ -62,25 +61,25 @@ def load_esp_results():
             headers=GITHUB_HEADERS, timeout=10
         )
         if res.status_code == 200:
-            content = base64.b64decode(res.json()["content"]).decode("utf-8")
+            content = base64.b64decode(res.json()["content"]).decode()
             data    = json.loads(content)
             if isinstance(data, dict):
                 ESP_RESULTS = data
                 save_esp_results()
-                print("[INFO] ESP_RESULTS loaded from GitHub")
+                print("[INFO] Loaded esp_results from GitHub")
                 return
     except Exception as e:
-        print(f"[WARN] Failed loading from GitHub: {e}")
+        print(f"[WARN] Failed load from GitHub: {e}")
 
     ESP_RESULTS = {}
     print("[INFO] ESP_RESULTS initialized empty")
 
 load_esp_results()
 
-# ================= ROBOFLOW =================
-WORKSPACE_NAME = "bocil-musik"
+# ================= ROBOFLOW CONFIG =================
+WORKSPACE_NAME = "my-workspace-rrwxa"
 WORKFLOW_ID    = "detect-count-and-visualize"
-TARGET_LABEL   = "juvenile"
+TARGET_LABEL   = "female"
 CONF_THRESHOLD = 0.4
 
 rf_client = None
@@ -89,72 +88,82 @@ def get_rf_client():
     global rf_client
     if rf_client is None:
         rf_client = InferenceHTTPClient(
-            api_url="https://serverless.roboflow.com",
+            api_url="https://detect.roboflow.com",
             api_key=ROBOFLOW_API_KEY
         )
     return rf_client
 
-# ================= ROBOFLOW VIA REST API (fallback) =================
+# ================= ROBOFLOW REST FALLBACK =================
 def run_roboflow_rest(image_bytes):
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    url = f"https://serverless.roboflow.com/{WORKSPACE_NAME}/{WORKFLOW_ID}"
-    headers = {
-        "Content-Type": "application/json"
-    }
-    payload = {
+    url       = f"https://serverless.roboflow.com/{WORKSPACE_NAME}/{WORKFLOW_ID}"
+    payload   = {
         "api_key": ROBOFLOW_API_KEY,
         "inputs": {
             "image": {
-                "type": "base64",
+                "type":  "base64",
                 "value": image_b64
             }
         }
     }
-
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    print(f"[DEBUG] REST API status: {resp.status_code}")
-    print(f"[DEBUG] REST API response: {resp.text[:500]}")
-
+    resp = requests.post(url, json=payload, timeout=60)
+    print(f"[DEBUG] REST status: {resp.status_code}")
+    print(f"[DEBUG] REST response: {resp.text[:500]}")
     if resp.status_code != 200:
-        raise Exception(f"Roboflow REST error {resp.status_code}: {resp.text}")
-
+        raise Exception(f"REST error {resp.status_code}: {resp.text}")
     return resp.json()
 
 # ================= PARSE PREDICTIONS =================
 def parse_predictions(result):
-    raw = None
-    if isinstance(result, dict) and "predictions" in result:
-        raw = result["predictions"]
-    elif isinstance(result, list) and result and "predictions" in result[0]:
-        raw = result[0]["predictions"]
+    predictions = []
 
-    if isinstance(raw, list):
-        return raw
-    elif isinstance(raw, dict) and "predictions" in raw:
-        return raw["predictions"]
-    return []
+    try:
+        if isinstance(result, list) and result:
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                if "predictions" in item:
+                    raw = item["predictions"]
+                    if isinstance(raw, list):
+                        predictions.extend(raw)
+                    elif isinstance(raw, dict) and "predictions" in raw:
+                        predictions.extend(raw["predictions"])
 
-# ================= HEALTH CHECK =================
-# PENTING: endpoint ini HARUS response cepat (< 2 detik)
-# ESP32 ping endpoint ini untuk wake up Render dari cold start
+        elif isinstance(result, dict):
+            if "predictions" in result:
+                raw = result["predictions"]
+                if isinstance(raw, list):
+                    predictions = raw
+                elif isinstance(raw, dict) and "predictions" in raw:
+                    predictions = raw["predictions"]
+            elif "result" in result and isinstance(result["result"], list):
+                predictions = result["result"]
+
+    except Exception as e:
+        print(f"[WARN] Parse error: {e}")
+
+    return predictions
+
+# ================= HEALTH =================
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({
         "status":         "ok",
+        "message":        "AI server running - Female Detection Ready",
         "target_label":   TARGET_LABEL,
-        "conf_threshold": CONF_THRESHOLD
+        "conf_threshold": CONF_THRESHOLD,
+        "workspace":      WORKSPACE_NAME
     })
 
-# ================= IMAGE UPLOAD =================
+# ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
 def upload():
     image_data = request.data
     if not image_data:
-        return jsonify({"error": "no image received"}), 400
+        return jsonify({"error": "no image data"}), 400
 
     image_size = len(image_data)
-    print(f"[INFO] Received {image_size} bytes")
+    print(f"[INFO] Received image: {image_size} bytes")
 
     if image_size < 1000:
         return jsonify({
@@ -162,20 +171,27 @@ def upload():
             "hint":  "Thunder Client: tab Body > Binary > pilih file JPG"
         }), 400
 
-    esp_id    = request.headers.get("X-ESP-ID", "unknown")
-    timestamp = int(time.time())
-    filename  = f"{esp_id}_{timestamp}.jpg"
+    esp_id = request.headers.get("X-ESP-ID", "unknown")
 
-    # Simpan ke file sementara
+    esp_timestamp = request.headers.get("X-Timestamp")
+    try:
+        timestamp = int(esp_timestamp) if esp_timestamp else int(time.time())
+    except Exception:
+        timestamp = int(time.time())
+
+    filename = f"{esp_id}_{timestamp}.jpg"
+    print(f"[INFO] Upload dari {esp_id} | size: {image_size} bytes")
+
+    # Simpan ke disk
     try:
         with open(filename, "wb") as f:
             f.write(image_data)
-        print(f"[INFO] Saved: {filename} ({image_size} bytes)")
+        print(f"[INFO] Saved: {filename}")
     except Exception as e:
-        return jsonify({"error": "failed to save", "detail": str(e)}), 500
+        return jsonify({"error": "save image failed", "detail": str(e)}), 500
 
-    # ===== COBA SDK DULU, FALLBACK KE REST API =====
-    result = None
+    # ===== ROBOFLOW: SDK dulu, fallback REST =====
+    result      = None
     method_used = ""
 
     try:
@@ -184,22 +200,21 @@ def upload():
             workspace_name=WORKSPACE_NAME,
             workflow_id=WORKFLOW_ID,
             images={"image": filename},
-            use_cache=True
+            use_cache=False
         )
         method_used = "SDK"
-        print(f"[INFO] Roboflow SDK berhasil")
+        print("[INFO] Roboflow SDK berhasil")
         try:
             print("[DEBUG] SDK result:\n" + json.dumps(result, indent=2, default=str))
         except Exception:
             print("[DEBUG] SDK result:", str(result)[:500])
 
     except Exception as sdk_err:
-        print(f"[WARN] SDK gagal: {sdk_err} — mencoba REST API...")
-
+        print(f"[WARN] SDK gagal: {sdk_err} — mencoba REST...")
         try:
             result      = run_roboflow_rest(image_data)
             method_used = "REST"
-            print(f"[INFO] Roboflow REST berhasil")
+            print("[INFO] REST berhasil")
         except Exception as rest_err:
             print(f"[ERROR] REST juga gagal: {rest_err}")
             if os.path.exists(filename):
@@ -211,16 +226,31 @@ def upload():
             }), 500
 
     # ===== UPLOAD GAMBAR KE GITHUB =====
+    # FIX: pakai path simpel langsung ke images/{esp_id}/{filename}
+    github_success = False
     try:
         with open(filename, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode()
-        res = requests.put(
-            f"{GITHUB_API_IMAGES}/{esp_id}/{filename}",
-            headers=GITHUB_HEADERS,
-            json={"message": f"upload from {esp_id}", "content": img_b64},
-            timeout=15
-        )
-        print(f"[INFO] GitHub image: {res.status_code}")
+
+        put_url = f"{GITHUB_API_IMAGES}/{esp_id}/{filename}"
+
+        # Cek apakah file sudah ada (perlu sha untuk update)
+        get_res = requests.get(put_url, headers=GITHUB_HEADERS, timeout=5)
+        sha     = get_res.json().get("sha") if get_res.status_code == 200 else None
+
+        payload = {
+            "message": f"upload from {esp_id} ({filename})",
+            "content": img_b64
+        }
+        if sha:
+            payload["sha"] = sha
+
+        res = requests.put(put_url, headers=GITHUB_HEADERS, json=payload, timeout=15)
+        if res.status_code in (200, 201):
+            github_success = True
+            print(f"[INFO] GitHub image upload sukses: {res.status_code}")
+        else:
+            print(f"[WARN] GitHub image gagal: {res.status_code} - {res.text[:300]}")
     except Exception as e:
         print(f"[WARN] GitHub image error: {e}")
 
@@ -250,17 +280,18 @@ def upload():
     detected_count = len(filtered)
     print(f"[INFO] '{TARGET_LABEL}' terdeteksi: {detected_count}")
 
-    # ===== SIMPAN HASIL =====
+    # ===== UPDATE & SAVE =====
     with ESP_LOCK:
         ESP_RESULTS[esp_id] = {
             "count":       detected_count,
-            "last_update": int(time.time() * 1000)
+            "last_update": timestamp * 1000
         }
         save_esp_results()
 
+        # Sync esp_results.json ke GitHub
         try:
-            json_content = json.dumps(ESP_RESULTS).encode("utf-8")
-            content_b64  = base64.b64encode(json_content).decode("utf-8")
+            json_content = json.dumps(ESP_RESULTS, indent=2).encode()
+            content_b64  = base64.b64encode(json_content).decode()
 
             get_res = requests.get(
                 f"{GITHUB_API_ROOT}/esp_results.json",
@@ -269,7 +300,7 @@ def upload():
             sha = get_res.json().get("sha") if get_res.status_code == 200 else None
 
             put_data = {
-                "message": f"Update from {esp_id} at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                "message": f"Update from {esp_id} - {time.strftime('%Y-%m-%d %H:%M')}",
                 "content": content_b64
             }
             if sha:
@@ -286,15 +317,16 @@ def upload():
     total_all = sum(v["count"] for v in ESP_RESULTS.values())
 
     return jsonify({
-        "status":                 "ok",
-        "esp_id":                 esp_id,
-        "method_used":            method_used,
-        "image_size_bytes":       image_size,
-        "detected_this_esp":      detected_count,
-        "total_detected_all_esp": total_all,
-        "per_esp":                ESP_RESULTS,
-        "objects":                filtered
-    }), 200
+        "status":               "ok",
+        "esp_id":               esp_id,
+        "method_used":          method_used,
+        "image_size_bytes":     image_size,
+        "detected_this_esp":    detected_count,
+        "total_all_esp":        total_all,
+        "per_esp":              ESP_RESULTS,
+        "objects":              filtered,
+        "github_image_success": github_success
+    })
 
 # ================= SUMMARY =================
 @app.route("/summary", methods=["GET"])
@@ -308,4 +340,4 @@ def summary():
 # ================= RUN =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
